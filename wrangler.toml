@@ -2,7 +2,7 @@ name = "strava-heatmap-proxy"
 type = "webpack"
 
 # Change this to your own account ID
-account_id = "32100188be477c016941c21575b20d4d"
+account_id = "3bf936c72fa408abbac0791bb2be921e"
 
 workers_dev = true
 route = ""
@@ -14,7 +14,7 @@ compatibility_date = "2021-11-19"
 # from Strava.
 #
 # Use "0" to disable caching.
-vars = { TILE_CACHE_SECS = "86400" }
+vars = { TILE_CACHE_SECS = "0" }
 
 # [secrets]
 # STRAVA_ID
