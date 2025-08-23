@@ -98,6 +98,21 @@ http://localhost:8080/identified/globalheat/sport_BackcountrySki/hot/11/1112/719
 http://localhost:8080/identified/globalheat/sport_NordicSki/hot/9/277/179.png?v=19
 ```
 
+## FAQ
+
+### I get `listen tcp :8080: bind: address already in use`
+
+```txt
+# Find the process using port 8080
+lsof -ti:8080
+
+# Kill the process (replace PID with actual process ID)
+kill $(lsof -ti:8080)
+
+# Or force kill if needed
+kill -9 $(lsof -ti:8080)
+```
+
 ## Changes after forking 
 
 - Fixed Issue is Browser Extension, that prevented usage in Chrome.
