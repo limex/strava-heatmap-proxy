@@ -17,7 +17,7 @@ The proxy will then automatically refresh CloudFront tokens in case they have ex
 With [git](https://git-scm.com/downloads), [golang](https://go.dev/) and [make](https://www.gnu.org/software/make/) available on your system, the following steps are sufficient to build and install `strava-heatmap-proxy` to the given path `INSTALL_PREFIX`:
 
 ```sh
-git clone https://github.com/patrickziegler/strava-heatmap-proxy
+git clone https://github.com/limex/strava-heatmap-proxy
 cd strava-heatmap-proxy
 INSTALL_PREFIX=~/.local/bin make install
 ```
@@ -98,9 +98,14 @@ http://localhost:8080/identified/globalheat/sport_BackcountrySki/hot/11/1112/719
 http://localhost:8080/identified/globalheat/sport_NordicSki/hot/9/277/179.png?v=19
 ```
 
+## Changes after forking 
+
+- Fixed Issue is Browser Extension, that prevented usage in Chrome.
+- Update to Go 1.25
 
 ## References
 
+1. Original repo of Patrick Ziegler https://github.com/patrickziegler/strava-heatmap-proxy 
 1. Discussion in https://github.com/bertt/wmts/issues/2 revealed the meaning of `CloudFront-*` tokens
 1. https://github.com/erik/strava-heatmap-proxy was following a similar approach but is designed to be a Cloudflare worker
 

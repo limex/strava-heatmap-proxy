@@ -6,7 +6,7 @@ OUTPUT := \
 	$(SERVICE_NAME) \
 	$(EXTENSION_NAME).zip
 
-.PHONY: all clean
+.PHONY: all clean install uninstall
 
 all: $(OUTPUT)
 
