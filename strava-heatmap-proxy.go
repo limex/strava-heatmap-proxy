@@ -18,6 +18,7 @@ type Param struct {
 	CookiesFile *string
 	Port        *string
 	Target      *string
+	ApiKeysFile *string
 }
 
 func getParam() *Param {
@@ -27,10 +28,19 @@ func getParam() *Param {
 	} else {
 		cookiesfile = path.Join(cookiesfile, ".config", "strava-heatmap-proxy", "strava-cookies.json")
 	}
+	
+	apikeysfile, err := os.UserHomeDir()
+	if err != nil {
+		apikeysfile = "api-keys.json"
+	} else {
+		apikeysfile = path.Join(apikeysfile, ".config", "strava-heatmap-proxy", "api-keys.json")
+	}
+	
 	param := &Param{
 		CookiesFile: flag.String("cookies", cookiesfile, "Path to the cookies file"),
 		Port:        flag.String("port", "8080", "Local proxy port"),
 		Target:      flag.String("target", "https://content-a.strava.com/", "Heatmap provider URL"),
+		ApiKeysFile: flag.String("apikeys", apikeysfile, "Path to the optional API keys file"),
 	}
 	flag.Parse()
 	return param
@@ -39,6 +49,78 @@ func getParam() *Param {
 type cookieEntry struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
+}
+
+type ApiKeyConfig struct {
+	Keys []string `json:"keys"`
+}
+
+type AuthenticatedHandler struct {
+	handler http.Handler
+	apiKeys map[string]bool
+}
+
+func NewAuthenticatedHandler(handler http.Handler, apiKeysFile string) (*AuthenticatedHandler, error) {
+	apiKeys := make(map[string]bool)
+	
+	if apiKeysFile != "" {
+		data, err := os.ReadFile(apiKeysFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read API keys file: %w", err)
+		}
+
+		var config ApiKeyConfig
+		if err := json.Unmarshal(data, &config); err != nil {
+			return nil, fmt.Errorf("failed to parse API keys file: %w", err)
+		}
+
+		for _, key := range config.Keys {
+			if key != "" {
+				apiKeys[key] = true
+			}
+		}
+		
+		if len(apiKeys) == 0 {
+			return nil, fmt.Errorf("no valid API keys found in config file")
+		}
+		
+		log.Printf("Loaded %d API keys from %s", len(apiKeys), apiKeysFile)
+	}
+	
+	return &AuthenticatedHandler{
+		handler: handler,
+		apiKeys: apiKeys,
+	}, nil
+}
+
+func (a *AuthenticatedHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Check if API key authentication is required
+	if len(a.apiKeys) == 0 {
+		// No API keys configured, allow all requests
+		a.handler.ServeHTTP(w, r)
+		return
+	}
+	
+	// Get API key from query parameter
+	apiKey := r.URL.Query().Get("key")
+	if apiKey == "" {
+		http.Error(w, "API key required.", http.StatusUnauthorized)
+		return
+	}
+	
+	// Validate API key
+	if !a.apiKeys[apiKey] {
+		http.Error(w, "Invalid API key", http.StatusUnauthorized)
+		return
+	}
+	
+	// Remove the key parameter before proxying to avoid leaking it
+	values := r.URL.Query()
+	values.Del("key")
+	r.URL.RawQuery = values.Encode()
+	
+	// API key is valid, proceed with the request
+	a.handler.ServeHTTP(w, r)
 }
 
 type StravaSessionClient struct {
@@ -194,7 +276,17 @@ func main() {
 	}
 
 	proxy := httputil.ReverseProxy{Director: director}
-	http.Handle("/", &proxy)
+	
+	// Create authenticated handler wrapper
+	authHandler, err := NewAuthenticatedHandler(&proxy, *param.ApiKeysFile)
+	if err != nil {
+		log.Printf("Warning: Failed to load API keys: %v", err)
+		log.Printf("Proceeding without API key authentication")
+		http.Handle("/", &proxy)
+	} else {
+		http.Handle("/", authHandler)
+	}
+	
 	log.Printf("Starting proxy for target %s on http://localhost:%s/ ..", *param.Target, *param.Port)
 	log.Fatal(http.ListenAndServe(":"+*param.Port, nil))
 }

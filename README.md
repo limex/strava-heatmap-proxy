@@ -35,6 +35,37 @@ The exported json file is needed for running [strava-heatmap-proxy](#using-the-p
 ## Using the proxy server
 
 Running the tool `strava-heatmap-proxy` from your terminal will set up a local proxy server for `https://content-a.strava.com/`.
+
+Available options:
+- `-cookies <file>`: Path to the cookies JSON file (default: `~/.config/strava-heatmap-proxy/strava-cookies.json`)
+- `-port <port>`: Local proxy port (default: `8080`)
+- `-target <url>`: Target Strava heatmap URL (default: `https://content-a.strava.com/`)
+- `-apikeys <file>`: Path to API keys configuration file (default: `~/.config/strava-heatmap-proxy/api-keys.json`)
+
+### API Key Authentication (Optional)
+
+You can optionally secure your proxy with API key authentication. Create an API keys configuration file:
+
+```json
+{
+  "keys": [
+    "your-secret-api-key-1",
+    "your-secret-api-key-2",
+    "another-api-key"
+  ]
+}
+```
+
+When API keys are configured, all requests must include a valid `key` parameter:
+
+```
+http://localhost:8080/identified/globalheat/all/bluered/10/512/384.png?v=19&key=your-secret-api-key-1
+```
+
+If no API keys file is found or the file is empty, the proxy runs without authentication (previous behavior).
+
+
+
 Every request to `http://localhost:8080/` will then be extended with session cookies before being forwarded to Strava.
 You can configure different target URLs or port numbers via `--target` or `--port` as well.
 
