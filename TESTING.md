@@ -32,7 +32,7 @@ go test -bench=BenchmarkAuthenticatedHandler -benchmem
 
 ## Test Coverage
 
-The test suite covers:
+The test suite covers: 
 
 ### Configuration Loading Tests
 - ✅ Loading valid API keys from JSON file

@@ -160,3 +160,26 @@ kill -9 $(lsof -ti:8080)
 This project is licensed under the GPL - see the [LICENSE](LICENSE) file for details
 
 
+# Adaptations when running in Google Cloud Run
+
+```sh
+git clone https://github.com/limex/strava-heatmap-proxy
+cd strava-heatmap-proxy
+INSTALL_PREFIX=./bin make install
+```
+cd bin
+
+# Observe that the executable is there
+# copy cookies.json and api-keys.json to this bin folder 
+
+gcloud run deploy strava-heatmap-proxy \
+  --source . \
+  --args="-cookies" \
+  --args="./cookies.json" \
+  --args="-apikeys" \
+  --args="./api-keys.json" \
+  --args="-port" \
+  --args="8080" \
+  --args="-target" \
+  --args="https://content-a.strava.com/" \
+  --region=europe-west1
