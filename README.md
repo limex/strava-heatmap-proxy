@@ -165,17 +165,25 @@ This project is licensed under the GPL - see the [LICENSE](LICENSE) file for det
 ```sh
 git clone https://github.com/limex/strava-heatmap-proxy
 cd strava-heatmap-proxy
-INSTALL_PREFIX=./bin make install
+# build to subfolder /build
+make install
 ```
-cd bin
+cd build
+
+./strava-heatmap-proxy \
+  -cookies ./strava-cookies.json \
+  -apikeys ./api-keys.json \
+  -port 8080 \
+  -target https://content-a.strava.com/
+
 
 # Observe that the executable is there
-# copy cookies.json and api-keys.json to this bin folder 
+# copy cookies.json and api-keys.json to this build folder 
 
 gcloud run deploy strava-heatmap-proxy \
   --source . \
   --args="-cookies" \
-  --args="./cookies.json" \
+  --args="./strava-cookies.json" \
   --args="-apikeys" \
   --args="./api-keys.json" \
   --args="-port" \
