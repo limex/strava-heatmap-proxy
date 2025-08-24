@@ -1,0 +1,27 @@
+# Ignore git files
+.git
+.gitignore
+
+# Ignore documentation
+README.md
+
+# Ignore test files
+*_test.go
+
+# Ignore build artifacts (except the config files we need)
+build/strava-heatmap-proxy
+# Keep the config files we need:
+# !build/strava-cookies.json
+# !build/api-keys.json
+
+# Ignore IDE files
+.vscode
+.idea
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
+
+# Ignore temporary files
+*.tmp
+*.log

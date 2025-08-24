@@ -9,22 +9,29 @@ To do so, you need the following two pieces:
 Note: [Previous versions](https://github.com/patrickziegler/strava-heatmap-proxy/tree/v1) of this repository were able to login to Strava automatically when running the proxy server.
 Due to recent changes on Strava side this is not possible anymore and we need to extract (at least) a valid session identifier via the browser extension.
 The proxy will then automatically refresh CloudFront tokens in case they have expired.
+  
+> This proxy can be run locally on your computer.  
+> Or can be deployed to Google Cloud Run, find the Details in the uber-next Section.
 
-## Getting started
+
+## Local Proxy: Getting started
 
 ### Build and Install
 
-With [git](https://git-scm.com/downloads), [golang](https://go.dev/) and [make](https://www.gnu.org/software/make/) available on your system, the following steps are sufficient to build and install `strava-heatmap-proxy` to the given path `INSTALL_PREFIX`:
+With [git](https://git-scm.com/downloads), [golang](https://go.dev/) and [make](https://www.gnu.org/software/make/) available on your system, the following steps are sufficient to build and install `strava-heatmap-proxy` to the given path:
 
 ```sh
 git clone https://github.com/limex/strava-heatmap-proxy
 cd strava-heatmap-proxy
-INSTALL_PREFIX=~/.local/bin make install
+make install
 ```
 
 ### Using the browser extension
 
-You can install the `strava-cookie-exporter` extension for Firefox from the Mozilla add-on store [here](https://addons.mozilla.org/de/firefox/addon/strava-cookie-exporter/).
+You can install the `strava-cookie-exporter` extension for **Firefox** from the Mozilla add-on store [here](https://addons.mozilla.org/de/firefox/addon/strava-cookie-exporter/).
+
+You can install the `strava-cookie-exporter` extension for **Chrome** from the Chrome Web store [here](https://chromewebstore.google.com/detail/strava-cookie-exporter/apkhbbckeaminpphaaaabpkhgimojlhk).
+
 
 With this extension installed, you can:
 - Use your browser to login and navigate to the [Strava Global Heatmap](https://www.strava.com/maps/global-heatmap)
@@ -40,11 +47,13 @@ Available options:
 - `-cookies <file>`: Path to the cookies JSON file (default: `~/.config/strava-heatmap-proxy/strava-cookies.json`)
 - `-port <port>`: Local proxy port (default: `8080`)
 - `-target <url>`: Target Strava heatmap URL (default: `https://content-a.strava.com/`)
-- `-apikeys <file>`: Path to API keys configuration file (default: `~/.config/strava-heatmap-proxy/api-keys.json`)
+- `-apikeys <file>`: (optional) Path to API keys configuration file (default: `~/.config/strava-heatmap-proxy/api-keys.json`)
 
 ### API Key Authentication (Optional)
 
-You can optionally secure your proxy with API key authentication. Create an API keys configuration file:
+You can optionally secure your proxy with API key authentication. Obviously, this doesn't make that much sense when running the proxy on your local machine when you're the only user, but there are use cases where you want to run that on a server or on a desktop that is shared among a network. Or deploy the Proxy to i.e. Google Cloud Run as described below.
+
+Create an API keys configuration file with minimum one key :
 
 ```json
 {
@@ -56,14 +65,13 @@ You can optionally secure your proxy with API key authentication. Create an API 
 }
 ```
 
-When API keys are configured, all requests must include a valid `key` parameter:
+When a `api-keys.json` key is present, all requests must include a valid `key` parameter:
 
 ```
 http://localhost:8080/identified/globalheat/all/bluered/10/512/384.png?v=19&key=your-secret-api-key-1
 ```
 
 If no API keys file is found or the file is empty, the proxy runs without authentication (previous behavior).
-
 
 
 Every request to `http://localhost:8080/` will then be extended with session cookies before being forwarded to Strava.
@@ -129,23 +137,16 @@ http://localhost:8080/identified/globalheat/sport_BackcountrySki/hot/11/1112/719
 http://localhost:8080/identified/globalheat/sport_NordicSki/hot/9/277/179.png?v=19
 ```
 
-## FAQ
+# Running in Google Cloud Run
 
-### I get `listen tcp :8080: bind: address already in use`
+See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed deployment instructions on Google Cloud Run.
 
-```txt
-# Find the process using port 8080
-lsof -ti:8080
 
-# Kill the process (replace PID with actual process ID)
-kill $(lsof -ti:8080)
-
-# Or force kill if needed
-kill -9 $(lsof -ti:8080)
-```
 
 ## Changes after forking 
 
+- Added Option to deploy to Google Cloud run
+- Added license keys feature
 - Fixed Issue is Browser Extension, that prevented usage in Chrome.
 - Update to Go 1.25
 
@@ -159,35 +160,3 @@ kill -9 $(lsof -ti:8080)
 
 This project is licensed under the GPL - see the [LICENSE](LICENSE) file for details
 
-
-# Adaptations when running in Google Cloud Run
-
-```sh
-git clone https://github.com/limex/strava-heatmap-proxy
-cd strava-heatmap-proxy
-# build to subfolder /build
-make install
-```
-cd build
-
-./strava-heatmap-proxy \
-  -cookies ./strava-cookies.json \
-  -apikeys ./api-keys.json \
-  -port 8080 \
-  -target https://content-a.strava.com/
-
-
-# Observe that the executable is there
-# copy cookies.json and api-keys.json to this build folder 
-
-gcloud run deploy strava-heatmap-proxy \
-  --source . \
-  --args="-cookies" \
-  --args="./strava-cookies.json" \
-  --args="-apikeys" \
-  --args="./api-keys.json" \
-  --args="-port" \
-  --args="8080" \
-  --args="-target" \
-  --args="https://content-a.strava.com/" \
-  --region=europe-west1

@@ -1,0 +1,37 @@
+# This file specifies files that are *not* uploaded to Google Cloud
+# using gcloud. It follows the same syntax as .gitignore, with the addition of
+# "#!include" directives (which insert the entries of the given .gitignore-style
+# file at that point).
+
+# Include .gitignore patterns except for build directory
+.git
+.gitignore
+
+# Binaries for programs and plugins
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool, specifically when used with LiteIDE
+*.out
+
+# Dependency directories (remove the comment below to include it)
+# vendor/
+
+# Project specific
+config.json
+# build/  <-- COMMENTED OUT - we need the config files from build/
+
+TODO
+strava-cookie-exporter.zip
+strava-heatmap-proxy
+strava-heatmap-proxy_test.go
+TESTING.md
+
+# Only exclude the binary from build directory, but keep config files
+build/strava-heatmap-proxy
