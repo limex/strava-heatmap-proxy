@@ -83,6 +83,15 @@ You can configure different locations of that file via `--cookies` as well.
 
 The CloudFront cookies have an expiration period of 24 hours, but you don't need to recreate the `strava-cookies.json` file all the time because `strava-heatmap-proxy` can automatically refresh expired cookies as long as the session is valid (the exact duration of that is unkown right now).
 
+Sadly the Strava Cookie needs manual update every weeks/month.
+When the proxy stops working, get a fresh json from the browser extension to the `build` folder (for the cloud deployment) or to `~/.config/strava-heatmap-proxy/strava-cookies.json` (if you use locoal deployment)
+
+For cloud run:   
+`./deploy.sh`.  
+This will: Rebuild the Docker image with fresh cookies baked in
+Deploy the new image to Cloud Run
+The proxy will start with fresh cookies and auto-maintain them
+
 ### In GIS, QMapShack
 
 To use this with your GIS software of choice, just define a simple [TMS](https://wiki.openstreetmap.org/wiki/TMS) layer like shown below that fetches high resolution heatmap tiles:
