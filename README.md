@@ -25,6 +25,7 @@ git clone https://github.com/limex/strava-heatmap-proxy
 cd strava-heatmap-proxy
 make install
 ```
+creates a folder /build with the executable.
 
 ### Using the browser extension
 

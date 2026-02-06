@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -127,6 +128,8 @@ type StravaSessionClient struct {
 	sessionIdentifier           string
 	cloudFrontCookies           []*http.Cookie
 	cloudFrontCookiesExpiration time.Time
+	cookiesFilePath             string
+	mu                          sync.Mutex
 }
 
 func NewStravaSessionClient(cookiesFilePath string) (*StravaSessionClient, error) {
@@ -141,7 +144,9 @@ func NewStravaSessionClient(cookiesFilePath string) (*StravaSessionClient, error
 		return nil, fmt.Errorf("error decoding json: %w", err)
 	}
 
-	client := &StravaSessionClient{}
+	client := &StravaSessionClient{
+		cookiesFilePath: cookiesFilePath,
+	}
 	for _, entry := range entries {
 		if entry.Name == "_strava4_session" {
 			client.sessionIdentifier = entry.Value
@@ -192,6 +197,97 @@ func (c *StravaSessionClient) readCloudFrontCookiesFromFile(entries []cookieEntr
 	return nil
 }
 
+// saveCookiesToFile persists the current CloudFront cookies to the JSON file.
+// It merges updated CloudFront cookies with existing file contents to preserve
+// session cookies and other non-CloudFront cookies.
+// Uses atomic write pattern (write temp file, then rename) to prevent corruption.
+// Returns error on failure but does not crash - proxy continues with in-memory cookies.
+func (c *StravaSessionClient) saveCookiesToFile() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// Step 1: Read existing cookies from file
+	var existingEntries []cookieEntry
+	data, err := os.ReadFile(c.cookiesFilePath)
+	if err != nil {
+		return fmt.Errorf("failed to read existing cookies file: %w", err)
+	}
+
+	if err := json.Unmarshal(data, &existingEntries); err != nil {
+		return fmt.Errorf("failed to parse existing cookies file: %w", err)
+	}
+
+	// Step 2: Build map of CloudFront cookie names to update
+	cloudFrontNames := map[string]bool{
+		"CloudFront-Policy":          true,
+		"CloudFront-Signature":       true,
+		"CloudFront-Key-Pair-Id":     true,
+		"_strava_idcf":               true,
+		"_strava_CloudFront-Expires": true,
+	}
+
+	// Step 3: Create map of new CloudFront cookie values
+	newCookies := make(map[string]string)
+	for _, cookie := range c.cloudFrontCookies {
+		newCookies[cookie.Name] = cookie.Value
+	}
+
+	// Add expiration timestamp
+	if !c.cloudFrontCookiesExpiration.IsZero() {
+		expirationMillis := c.cloudFrontCookiesExpiration.UnixMilli()
+		newCookies["_strava_CloudFront-Expires"] = strconv.FormatInt(expirationMillis, 10)
+	}
+
+	// Step 4: Merge - update CloudFront cookies, preserve others (including _strava4_session)
+	var mergedEntries []cookieEntry
+	for _, entry := range existingEntries {
+		if cloudFrontNames[entry.Name] {
+			// Replace with new value if we have it
+			if newValue, exists := newCookies[entry.Name]; exists {
+				mergedEntries = append(mergedEntries, cookieEntry{
+					Name:  entry.Name,
+					Value: newValue,
+				})
+				delete(newCookies, entry.Name) // Mark as processed
+			}
+			// If we don't have a new value, skip the old one (it's expired)
+		} else {
+			// Preserve non-CloudFront cookies unchanged (session, sp, etc.)
+			mergedEntries = append(mergedEntries, entry)
+		}
+	}
+
+	// Step 5: Append any new CloudFront cookies that weren't in the original file
+	for name, value := range newCookies {
+		mergedEntries = append(mergedEntries, cookieEntry{
+			Name:  name,
+			Value: value,
+		})
+	}
+
+	// Step 6: Marshal to JSON with pretty formatting (matches browser extension output)
+	jsonData, err := json.MarshalIndent(mergedEntries, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal cookies to JSON: %w", err)
+	}
+
+	// Step 7: Atomic write - write to temp file first
+	tempFile := c.cookiesFilePath + ".tmp"
+	if err := os.WriteFile(tempFile, jsonData, 0600); err != nil {
+		return fmt.Errorf("failed to write temp cookies file: %w", err)
+	}
+
+	// Step 8: Atomic rename - replaces old file
+	if err := os.Rename(tempFile, c.cookiesFilePath); err != nil {
+		// Cleanup temp file if rename fails
+		os.Remove(tempFile)
+		return fmt.Errorf("failed to rename temp cookies file: %w", err)
+	}
+
+	log.Printf("Successfully persisted updated CloudFront cookies to %s", c.cookiesFilePath)
+	return nil
+}
+
 func (c *StravaSessionClient) fetchCloudFrontCookies() error {
 	req, err := http.NewRequest("HEAD", "https://www.strava.com/maps", nil)
 	if err != nil {
@@ -233,6 +329,13 @@ func (c *StravaSessionClient) fetchCloudFrontCookies() error {
 	if expiration != 0 {
 		c.cloudFrontCookiesExpiration = time.UnixMilli(expiration)
 		log.Printf("New CloudFront cookies will expire at %s", c.cloudFrontCookiesExpiration)
+	}
+
+	// Persist updated cookies to file
+	if err := c.saveCookiesToFile(); err != nil {
+		// Log warning but don't fail - proxy continues with in-memory cookies
+		log.Printf("Warning: Failed to persist cookies to file: %v", err)
+		log.Printf("Proxy will continue operating with in-memory cookies only")
 	}
 
 	return nil
