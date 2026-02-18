@@ -153,12 +153,17 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for detailed deployment instructions on Googl
 
 
 
-## Changes after forking 
+## Changes after forking
 
 - Added Option to deploy to Google Cloud run
 - Added license keys feature
 - Fixed Issue is Browser Extension, that prevented usage in Chrome.
 - Update to Go 1.25
+- Persist refreshed CloudFront cookies back to `strava-cookies.json` (atomic write via temp file + rename) so they survive proxy restarts
+- Detect 403 responses from Strava CDN and immediately force a cookie refresh using a ModifyResponse hook on the reverse proxy
+- Guard concurrent refresh calls with an atomic bool to prevent redundant simultaneous HEAD requests to Strava on cookie expiry
+- Add `/health` endpoint returning cookie expiry time; triggers a proactive background refresh when cookies are within 4h of expiry
+- Set up Cloud Scheduler job (europe-west3) to hit `/health` every 20h, refreshing cookies before Strava's 24h expiry window
 
 ## References
 

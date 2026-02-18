@@ -10,7 +10,7 @@ This guide explains how to deploy the Strava Heatmap Proxy to Google Cloud Run.
    ```bash
    # macOS (using Homebrew)
    brew install google-cloud-sdk
-   
+
    # Or download from: https://cloud.google.com/sdk/docs/install
    ```
 
@@ -25,6 +25,7 @@ This guide explains how to deploy the Strava Heatmap Proxy to Google Cloud Run.
    gcloud services enable cloudbuild.googleapis.com
    gcloud services enable run.googleapis.com
    gcloud services enable containerregistry.googleapis.com
+   gcloud services enable cloudscheduler.googleapis.com
    ```
 
 ## Configuration Files
@@ -41,6 +42,7 @@ Before deploying, ensure you have the required configuration files in the `build
     PROJECT_ID="strava-heatmap-proxy"
     SERVICE_NAME="strava-heatmap-proxy"
     REGION="europe-north2"
+    SCHEDULER_REGION="europe-west3"   # Cloud Scheduler does not support europe-north2
    ```
 
 2. **Run the deployment script**:
@@ -48,7 +50,12 @@ Before deploying, ensure you have the required configuration files in the `build
    ./deploy.sh
    ```
 
-## Manual Deployment (not tested so far)
+   The script will:
+   - Build and push the Docker image
+   - Deploy to Cloud Run
+   - Create (or update) a Cloud Scheduler job that hits `/health` every 20h to proactively refresh CloudFront cookies before Strava's 24h expiry window
+
+## Manual Deployment
 
 If you prefer to deploy manually:
 
@@ -63,52 +70,103 @@ If you prefer to deploy manually:
    gcloud run deploy strava-heatmap-proxy \
      --image=gcr.io/${PROJECT_ID}/strava-heatmap-proxy \
      --platform=managed \
-     --region=us-central1 \
+     --region=europe-north2 \
      --allow-unauthenticated \
      --port=8080 \
      --memory=512Mi \
      --cpu=1 \
-     --max-instances=10
+     --min-instances=0 \
+     --max-instances=10 \
+     --timeout=300 \
+     --concurrency=100
    ```
 
-## Environment Variables
+3. **Set up Cloud Scheduler** (proactive cookie refresh every 20h):
+   ```bash
+   SERVICE_URL=$(gcloud run services describe strava-heatmap-proxy \
+     --platform=managed --region=europe-north2 --format="value(status.url)")
 
-The application supports the following environment variables:
-
-- `PORT`: The port to run the application on (automatically set by Cloud Run)
-
-## Security Considerations
-
-- The service is deployed with `--allow-unauthenticated` for easy access. Consider adding authentication if needed.
-- Configuration files containing sensitive data (cookies, API keys) are baked into the container image.
-- For production use, consider using Google Secret Manager to store sensitive data.
+   # europe-north2 is not supported by Cloud Scheduler; use europe-west3
+   gcloud scheduler jobs create http strava-cookie-refresh \
+     --location=europe-west3 \
+     --schedule="0 */20 * * *" \
+     --uri="${SERVICE_URL}/health" \
+     --http-method=GET \
+     --time-zone="Europe/Vienna" \
+     --description="Proactively refresh Strava CloudFront cookies before 24h expiry" \
+     --attempt-deadline=30s
+   ```
 
 ## Monitoring and Logs
 
+- **Check proxy health and cookie expiry**:
+  ```bash
+  curl https://<your-service-url>/health
+  # Returns: {"status":"ok","cookies_expire":"2026-02-19T12:00:00Z"}
+  ```
+
 - **View logs**: `gcloud logs tail --service=strava-heatmap-proxy`
+
 - **Monitor in Console**: Go to Google Cloud Console > Cloud Run > strava-heatmap-proxy
+
+- **Manage the Cloud Scheduler job** (note: different region from Cloud Run):
+  ```bash
+  gcloud scheduler jobs list --location=europe-west3
+  gcloud scheduler jobs run strava-cookie-refresh --location=europe-west3
+  ```
+
+## Cookie Refresh Strategy
+
+The proxy uses a two-layer approach to keep CloudFront cookies fresh:
+
+1. **Reactive (403 detection)**: If Strava CDN returns a 403, the proxy immediately forces a cookie refresh via the `ModifyResponse` hook. The next request will use fresh cookies.
+
+2. **Proactive (Cloud Scheduler)**: A Cloud Scheduler job hits `/health` every 20h. If cookies are within 4h of their 24h expiry, a background goroutine fetches fresh cookies — avoiding any outage window.
+
+Refreshed cookies are atomically written back to `strava-cookies.json` so they survive container restarts within the same deployment.
+
+## When Cookies Expire (Manual Step Required)
+
+The `_strava4_session` cookie cannot be refreshed programmatically. When it expires (typically weeks to months), the proxy will fail to fetch new CloudFront tokens. Signs of this:
+- `/health` returns an old or zero expiry time
+- Logs show failed HEAD requests to `strava.com/maps`
+- Tiles return errors even after cookie refresh attempts
+
+**Fix**: Export fresh cookies from the browser extension, place `strava-cookies.json` in `build/`, then redeploy:
+```bash
+./deploy.sh
+```
+
+## Security Considerations
+
+- The service is deployed with `--allow-unauthenticated` for easy access. Use `api-keys.json` to add API key authentication if needed.
+- Configuration files containing sensitive data (cookies, API keys) are baked into the container image.
+- For production use, consider using Google Secret Manager to store sensitive data.
 
 ## Cleanup
 
 To delete the deployed service:
 ```bash
-gcloud run services delete strava-heatmap-proxy --region=us-central1
+gcloud run services delete strava-heatmap-proxy --region=europe-north2
+```
+
+To delete the Cloud Scheduler job:
+```bash
+gcloud scheduler jobs delete strava-cookie-refresh --location=europe-west3
 ```
 
 ## Troubleshooting
 
-- **Build fails**: Check that all required files are present and the Dockerfile syntax is correct
-- **Service fails to start**: Check the logs for error messages
-- **Authentication issues**: Ensure cookies and API keys are valid and properly formatted
+- **Build fails**: Check that all required files are present in `build/` and the Dockerfile syntax is correct
+- **Service fails to start**: Check the logs — likely missing or invalid `strava-cookies.json`
+- **Tiles return 403**: CloudFront cookies rejected by Strava CDN. Check `/health` for expiry time. If session cookie expired, re-export from browser and redeploy.
+- **Scheduler job not found**: Remember it lives in `europe-west3`, not `europe-north2`
 
 ## Cost Optimization
 
-Cloud Run pricing is based on:
-- CPU and memory allocation
-- Number of requests
-- Request duration
+Cloud Run pricing is based on CPU and memory allocation, number of requests, and request duration. The current configuration uses `min-instances=0` (scale to zero when idle) with minimal resources (512Mi memory, 1 CPU) to keep costs near zero.
 
-The current configuration uses minimal resources (512Mi memory, 1 CPU) to keep costs low.
+The Cloud Scheduler job (20h ping) wakes the instance briefly to refresh cookies — this cold start (~1-2s) is acceptable and the request cost is negligible.
 
 ## Docs
 

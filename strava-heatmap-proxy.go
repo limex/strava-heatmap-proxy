@@ -12,6 +12,7 @@ import (
 	"path"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -130,6 +131,7 @@ type StravaSessionClient struct {
 	cloudFrontCookiesExpiration time.Time
 	cookiesFilePath             string
 	mu                          sync.Mutex
+	refreshing                  atomic.Bool
 }
 
 func NewStravaSessionClient(cookiesFilePath string) (*StravaSessionClient, error) {
@@ -366,20 +368,58 @@ func main() {
 		req.Host = target.Host
 		// refresh expired CloudFront cookies before forwarding the request
 		if client.cloudFrontCookiesExpiration.IsZero() || time.Now().After(client.cloudFrontCookiesExpiration) {
-			log.Printf("CloudFront cookies have expired, refreshing...")
-			if err := client.fetchCloudFrontCookies(); err != nil {
-				log.Fatalf("Warning: Failed to fetch CloudFront cookies: %s", err)
+			if client.refreshing.CompareAndSwap(false, true) {
+				defer client.refreshing.Store(false)
+				log.Printf("CloudFront cookies have expired, refreshing...")
+				if err := client.fetchCloudFrontCookies(); err != nil {
+					log.Fatalf("Warning: Failed to fetch CloudFront cookies: %s", err)
+				}
 			}
 		}
 		// add CloudFront cookies to the request
 		for _, c := range client.cloudFrontCookies {
 			req.AddCookie(c)
 		}
-		// log.Printf("Got request: %s", req.URL)
 	}
 
-	proxy := httputil.ReverseProxy{Director: director}
-	
+	modifyResponse := func(resp *http.Response) error {
+		if resp.StatusCode == http.StatusForbidden {
+			if client.refreshing.CompareAndSwap(false, true) {
+				defer client.refreshing.Store(false)
+				log.Printf("Received 403 from Strava CDN - CloudFront cookies rejected early, forcing refresh...")
+				client.mu.Lock()
+				client.cloudFrontCookiesExpiration = time.Time{}
+				client.mu.Unlock()
+				if err := client.fetchCloudFrontCookies(); err != nil {
+					log.Printf("Warning: Failed to refresh CloudFront cookies after 403: %v", err)
+				}
+			}
+		}
+		return nil
+	}
+
+	proxy := httputil.ReverseProxy{Director: director, ModifyResponse: modifyResponse}
+
+	// Health endpoint: returns cookie expiry time and proactively refreshes
+	// cookies when within 4h of expiry. Hit by Cloud Scheduler every 20h.
+	http.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
+		if time.Until(client.cloudFrontCookiesExpiration) < 4*time.Hour {
+			if client.refreshing.CompareAndSwap(false, true) {
+				go func() {
+					defer client.refreshing.Store(false)
+					log.Printf("Health check triggering proactive cookie refresh...")
+					if err := client.fetchCloudFrontCookies(); err != nil {
+						log.Printf("Warning: Proactive refresh failed: %v", err)
+					}
+				}()
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"status":"ok","cookies_expire":"%s"}`,
+			client.cloudFrontCookiesExpiration.UTC().Format(time.RFC3339))
+	})
+
 	// Create authenticated handler wrapper
 	authHandler, err := NewAuthenticatedHandler(&proxy, *param.ApiKeysFile)
 	if err != nil {

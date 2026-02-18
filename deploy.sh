@@ -19,11 +19,14 @@ PROJECT_ID="strava-heatmap-proxy"
 SERVICE_NAME="strava-heatmap-proxy"
 # REGION="${GOOGLE_CLOUD_REGION:-us-central1}"
 REGION="europe-north2"
+# Cloud Scheduler does not support europe-north2; use nearest supported region
+SCHEDULER_REGION="europe-west3"
 IMAGE_NAME="gcr.io/${PROJECT_ID}/${SERVICE_NAME}"
 
 echo "🚀 Deploying Strava Heatmap Proxy to Google Cloud Run"
 echo "Project: ${PROJECT_ID}"
 echo "Region: ${REGION}"
+echo "Scheduler Region: ${SCHEDULER_REGION}"
 echo "Service: ${SERVICE_NAME}"
 echo "Image: ${IMAGE_NAME}"
 echo
@@ -76,6 +79,26 @@ SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" \
     --region="${REGION}" \
     --format="value(status.url)")
 
+echo "⏰ Setting up Cloud Scheduler for proactive cookie refresh..."
+gcloud services enable cloudscheduler.googleapis.com
+# Create job if it doesn't exist, otherwise update it (idempotent)
+gcloud scheduler jobs create http strava-cookie-refresh \
+    --location="${SCHEDULER_REGION}" \
+    --schedule="0 */20 * * *" \
+    --uri="${SERVICE_URL}/health" \
+    --http-method=GET \
+    --time-zone="Europe/Vienna" \
+    --description="Proactively refresh Strava CloudFront cookies before 24h expiry" \
+    --attempt-deadline=30s \
+    2>/dev/null || \
+gcloud scheduler jobs update http strava-cookie-refresh \
+    --location="${SCHEDULER_REGION}" \
+    --schedule="0 */20 * * *" \
+    --uri="${SERVICE_URL}/health" \
+    --http-method=GET \
+    --time-zone="Europe/Vienna" \
+    --attempt-deadline=30s
+
 echo
 echo "✅ Deployment completed successfully!"
 echo "🌐 Service URL: ${SERVICE_URL}"
@@ -88,3 +111,7 @@ echo "gcloud logs tail --service=${SERVICE_NAME}"
 echo
 echo "To delete the service:"
 echo "gcloud run services delete ${SERVICE_NAME} --region=${REGION}"
+echo
+echo "To manage the cookie refresh scheduler job (note: different region):"
+echo "gcloud scheduler jobs list --location=${SCHEDULER_REGION}"
+echo "gcloud scheduler jobs run strava-cookie-refresh --location=${SCHEDULER_REGION}"
