@@ -988,17 +988,37 @@ func TestFetchCloudFrontCookies_PersistsToFile(t *testing.T) {
 	}))
 	defer server.Close()
 
-	_, err := NewStravaSessionClient(cookiesFile)
+	// Now we have stravaHeatmapURL as a package-level var — point it at our mock server
+	// and verify that fetchCloudFrontCookies persists cookies back to file.
+	oldURL := stravaHeatmapURL
+	stravaHeatmapURL = server.URL
+	defer func() { stravaHeatmapURL = oldURL }()
+
+	client, err := NewStravaSessionClient(cookiesFile, "", "")
 	if err != nil {
 		t.Fatalf("Failed to create client: %v", err)
 	}
 
-	// Note: This test demonstrates the concept of integration testing
-	// A full integration test would require refactoring fetchCloudFrontCookies
-	// to accept a URL parameter for proper mocking of the Strava endpoint
-	// For now, the unit tests above verify the saveCookiesToFile logic works correctly
+	if err := client.fetchCloudFrontCookies(); err != nil {
+		t.Fatalf("fetchCloudFrontCookies failed: %v", err)
+	}
 
-	t.Log("Integration test shows concept - full mock would require refactoring fetchCloudFrontCookies to accept URL parameter")
+	// Verify cookies were persisted to file
+	savedData, _ := os.ReadFile(cookiesFile)
+	var savedCookies []cookieEntry
+	json.Unmarshal(savedData, &savedCookies)
+
+	cookieMap := make(map[string]string)
+	for _, c := range savedCookies {
+		cookieMap[c.Name] = c.Value
+	}
+
+	if cookieMap["CloudFront-Policy"] != "fresh-policy" {
+		t.Errorf("CloudFront-Policy not persisted: got '%s'", cookieMap["CloudFront-Policy"])
+	}
+	if cookieMap["_strava4_session"] != "test-session" {
+		t.Error("Session cookie was lost after fetchCloudFrontCookies")
+	}
 }
 
 func TestModifyResponse_403ForcesExpiration(t *testing.T) {
@@ -1024,5 +1044,481 @@ func TestModifyResponse_403ForcesExpiration(t *testing.T) {
 	expired := client.cloudFrontCookiesExpiration.IsZero() || time.Now().After(client.cloudFrontCookiesExpiration)
 	if !expired {
 		t.Error("Expected expiration check to return true (needs refresh) after 403 handling")
+	}
+}
+
+// ============================================================================
+// CSRF Token Extraction Tests
+// ============================================================================
+
+func TestExtractCSRFToken_StandardOrder(t *testing.T) {
+	html := `<input type="hidden" name="authenticity_token" value="abc123==" autocomplete="off" />`
+	token, err := extractCSRFToken(html)
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+	if token != "abc123==" {
+		t.Errorf("Expected 'abc123==', got '%s'", token)
+	}
+}
+
+func TestExtractCSRFToken_ReversedOrder(t *testing.T) {
+	html := `<input type="hidden" value="xyz789==" name="authenticity_token" />`
+	token, err := extractCSRFToken(html)
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+	if token != "xyz789==" {
+		t.Errorf("Expected 'xyz789==', got '%s'", token)
+	}
+}
+
+func TestExtractCSRFToken_Missing(t *testing.T) {
+	html := `<form><input type="text" name="email" /></form>`
+	_, err := extractCSRFToken(html)
+	if err == nil {
+		t.Error("Expected error when token is missing, got none")
+	}
+}
+
+func TestExtractCSRFToken_MultipleInputs(t *testing.T) {
+	html := `
+		<input type="text" name="email" value="user@example.com" />
+		<input type="hidden" name="authenticity_token" value="correct-token" />
+		<input type="password" name="password" value="secret" />
+	`
+	token, err := extractCSRFToken(html)
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+	if token != "correct-token" {
+		t.Errorf("Expected 'correct-token', got '%s'", token)
+	}
+}
+
+func TestExtractCSRFToken_EmptyHTML(t *testing.T) {
+	_, err := extractCSRFToken("")
+	if err == nil {
+		t.Error("Expected error for empty HTML, got none")
+	}
+}
+
+// ============================================================================
+// loginToStrava Tests (using mock HTTP server)
+// ============================================================================
+
+func TestLoginToStrava_Success(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login":
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `<input type="hidden" name="authenticity_token" value="test-csrf-token" />`)
+		case "/session":
+			// Verify the CSRF token and credentials were sent
+			r.ParseForm()
+			if r.FormValue("authenticity_token") != "test-csrf-token" {
+				t.Errorf("CSRF token not sent: got '%s'", r.FormValue("authenticity_token"))
+			}
+			if r.FormValue("email") != "user@example.com" {
+				t.Errorf("Email not sent: got '%s'", r.FormValue("email"))
+			}
+			if r.FormValue("password") != "secret" {
+				t.Errorf("Password not sent: got '%s'", r.FormValue("password"))
+			}
+			// Success: redirect to dashboard with session cookie
+			http.SetCookie(w, &http.Cookie{Name: "_strava4_session", Value: "new-session-value"})
+			http.Redirect(w, r, "/dashboard", http.StatusFound)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	oldURL := stravaBaseURL
+	stravaBaseURL = server.URL
+	defer func() { stravaBaseURL = oldURL }()
+
+	client := &StravaSessionClient{email: "user@example.com", password: "secret"}
+	session, err := client.loginToStrava()
+	if err != nil {
+		t.Fatalf("Expected login to succeed, got error: %v", err)
+	}
+	if session != "new-session-value" {
+		t.Errorf("Expected session 'new-session-value', got '%s'", session)
+	}
+}
+
+func TestLoginToStrava_WrongCredentials(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login":
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `<input type="hidden" name="authenticity_token" value="csrf" />`)
+		case "/session":
+			// Failure: redirect back to /login
+			http.Redirect(w, r, "/login", http.StatusFound)
+		}
+	}))
+	defer server.Close()
+
+	oldURL := stravaBaseURL
+	stravaBaseURL = server.URL
+	defer func() { stravaBaseURL = oldURL }()
+
+	client := &StravaSessionClient{email: "wrong@example.com", password: "wrongpass"}
+	_, err := client.loginToStrava()
+	if err == nil {
+		t.Error("Expected error for wrong credentials, got none")
+	}
+	if !strings.Contains(err.Error(), "login failed") {
+		t.Errorf("Expected 'login failed' error, got: %v", err)
+	}
+}
+
+func TestLoginToStrava_NoCSRFToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" {
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `<form><input type="text" name="email" /></form>`) // no CSRF token
+		}
+	}))
+	defer server.Close()
+
+	oldURL := stravaBaseURL
+	stravaBaseURL = server.URL
+	defer func() { stravaBaseURL = oldURL }()
+
+	client := &StravaSessionClient{email: "user@example.com", password: "secret"}
+	_, err := client.loginToStrava()
+	if err == nil {
+		t.Error("Expected error when CSRF token is missing, got none")
+	}
+	if !strings.Contains(err.Error(), "CSRF") {
+		t.Errorf("Expected CSRF-related error, got: %v", err)
+	}
+}
+
+func TestLoginToStrava_ServerError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" {
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	defer server.Close()
+
+	oldURL := stravaBaseURL
+	stravaBaseURL = server.URL
+	defer func() { stravaBaseURL = oldURL }()
+
+	client := &StravaSessionClient{email: "user@example.com", password: "secret"}
+	_, err := client.loginToStrava()
+	if err == nil {
+		t.Error("Expected error for server error on GET /login, got none")
+	}
+}
+
+// ============================================================================
+// fetchCredentials Tests
+// ============================================================================
+
+func TestFetchCredentials_CLIFlags(t *testing.T) {
+	email, password, err := fetchCredentials("cli@example.com", "clipass")
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+	if email != "cli@example.com" {
+		t.Errorf("Expected CLI email, got '%s'", email)
+	}
+	if password != "clipass" {
+		t.Errorf("Expected CLI password, got '%s'", password)
+	}
+}
+
+func TestFetchCredentials_EnvVars(t *testing.T) {
+	t.Setenv("STRAVA_EMAIL", "env@example.com")
+	t.Setenv("STRAVA_PASSWORD", "envpass")
+
+	email, password, err := fetchCredentials("", "")
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+	if email != "env@example.com" {
+		t.Errorf("Expected env email, got '%s'", email)
+	}
+	if password != "envpass" {
+		t.Errorf("Expected env password, got '%s'", password)
+	}
+}
+
+func TestFetchCredentials_NoneAvailable(t *testing.T) {
+	// Ensure env vars are not set
+	t.Setenv("STRAVA_EMAIL", "")
+	t.Setenv("STRAVA_PASSWORD", "")
+
+	// fetchCredentials will try Secret Manager (metadata server) which is not
+	// reachable in a test environment — this should return an error quickly.
+	_, _, err := fetchCredentials("", "")
+	if err == nil {
+		t.Error("Expected error when no credentials are available, got none")
+	}
+}
+
+func TestFetchCredentials_CLITakesPrecedenceOverEnv(t *testing.T) {
+	t.Setenv("STRAVA_EMAIL", "env@example.com")
+	t.Setenv("STRAVA_PASSWORD", "envpass")
+
+	email, password, err := fetchCredentials("cli@example.com", "clipass")
+	if err != nil {
+		t.Fatalf("Expected no error, got: %v", err)
+	}
+	if email != "cli@example.com" {
+		t.Errorf("Expected CLI email to take precedence, got '%s'", email)
+	}
+	if password != "clipass" {
+		t.Errorf("Expected CLI password to take precedence, got '%s'", password)
+	}
+}
+
+// ============================================================================
+// saveSessionToFile Tests
+// ============================================================================
+
+func TestSaveSessionToFile_UpdatesSession(t *testing.T) {
+	tempDir := t.TempDir()
+	cookiesFile := filepath.Join(tempDir, "strava-cookies.json")
+
+	initialCookies := []cookieEntry{
+		{Name: "_strava4_session", Value: "old-session"},
+		{Name: "CloudFront-Policy", Value: "policy-value"},
+		{Name: "sp", Value: "other-cookie"},
+	}
+	data, _ := json.MarshalIndent(initialCookies, "", "  ")
+	os.WriteFile(cookiesFile, data, 0644)
+
+	client := &StravaSessionClient{cookiesFilePath: cookiesFile}
+	if err := client.saveSessionToFile("new-session-value"); err != nil {
+		t.Fatalf("saveSessionToFile failed: %v", err)
+	}
+
+	savedData, _ := os.ReadFile(cookiesFile)
+	var savedCookies []cookieEntry
+	json.Unmarshal(savedData, &savedCookies)
+
+	cookieMap := make(map[string]string)
+	for _, c := range savedCookies {
+		cookieMap[c.Name] = c.Value
+	}
+
+	if cookieMap["_strava4_session"] != "new-session-value" {
+		t.Errorf("Session not updated: got '%s'", cookieMap["_strava4_session"])
+	}
+	// Other cookies should be preserved
+	if cookieMap["CloudFront-Policy"] != "policy-value" {
+		t.Errorf("CloudFront-Policy was lost: got '%s'", cookieMap["CloudFront-Policy"])
+	}
+	if cookieMap["sp"] != "other-cookie" {
+		t.Errorf("Other cookie was lost: got '%s'", cookieMap["sp"])
+	}
+}
+
+func TestSaveSessionToFile_PreservesCloudFrontCookies(t *testing.T) {
+	tempDir := t.TempDir()
+	cookiesFile := filepath.Join(tempDir, "strava-cookies.json")
+
+	initialCookies := []cookieEntry{
+		{Name: "_strava4_session", Value: "old-session"},
+		{Name: "CloudFront-Policy", Value: "important-policy"},
+		{Name: "CloudFront-Signature", Value: "important-sig"},
+		{Name: "CloudFront-Key-Pair-Id", Value: "important-key"},
+		{Name: "_strava_idcf", Value: "important-idcf"},
+		{Name: "_strava_CloudFront-Expires", Value: "9999999999999"},
+	}
+	data, _ := json.MarshalIndent(initialCookies, "", "  ")
+	os.WriteFile(cookiesFile, data, 0644)
+
+	client := &StravaSessionClient{cookiesFilePath: cookiesFile}
+	client.saveSessionToFile("brand-new-session")
+
+	savedData, _ := os.ReadFile(cookiesFile)
+	var savedCookies []cookieEntry
+	json.Unmarshal(savedData, &savedCookies)
+
+	cookieMap := make(map[string]string)
+	for _, c := range savedCookies {
+		cookieMap[c.Name] = c.Value
+	}
+
+	// Session should be updated
+	if cookieMap["_strava4_session"] != "brand-new-session" {
+		t.Errorf("Session not updated")
+	}
+	// CloudFront cookies must be untouched
+	if cookieMap["CloudFront-Policy"] != "important-policy" {
+		t.Errorf("CloudFront-Policy was modified")
+	}
+	if cookieMap["_strava_CloudFront-Expires"] != "9999999999999" {
+		t.Errorf("CloudFront-Expires was modified")
+	}
+}
+
+// ============================================================================
+// fetchCloudFrontCookies Session Expiry Tests
+// ============================================================================
+
+func TestFetchCloudFrontCookies_SessionExpired_LoginSucceeds(t *testing.T) {
+	tempDir := t.TempDir()
+	cookiesFile := filepath.Join(tempDir, "strava-cookies.json")
+
+	initialCookies := []cookieEntry{
+		{Name: "_strava4_session", Value: "expired-session"},
+	}
+	data, _ := json.MarshalIndent(initialCookies, "", "  ")
+	os.WriteFile(cookiesFile, data, 0644)
+
+	// Mock server handles both the heatmap URL and the login flow
+	var requestCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		switch r.URL.Path {
+		case "/maps":
+			if requestCount == 1 {
+				// First call: session expired → redirect to login
+				http.Redirect(w, r, "/login", http.StatusFound)
+			} else {
+				// Second call (after re-login): success with CloudFront cookies
+				http.SetCookie(w, &http.Cookie{Name: "CloudFront-Policy", Value: "fresh-policy"})
+				http.SetCookie(w, &http.Cookie{Name: "CloudFront-Signature", Value: "fresh-sig"})
+				http.SetCookie(w, &http.Cookie{Name: "CloudFront-Key-Pair-Id", Value: "fresh-key"})
+				http.SetCookie(w, &http.Cookie{Name: "_strava_idcf", Value: "fresh-idcf"})
+				http.SetCookie(w, &http.Cookie{Name: "_strava_CloudFront-Expires", Value: "9999999999999"})
+				w.WriteHeader(http.StatusOK)
+			}
+		case "/login":
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprint(w, `<input type="hidden" name="authenticity_token" value="csrf-token" />`)
+		case "/session":
+			http.SetCookie(w, &http.Cookie{Name: "_strava4_session", Value: "fresh-session"})
+			http.Redirect(w, r, "/dashboard", http.StatusFound)
+		}
+	}))
+	defer server.Close()
+
+	oldHeatmap := stravaHeatmapURL
+	oldBase := stravaBaseURL
+	stravaHeatmapURL = server.URL + "/maps"
+	stravaBaseURL = server.URL
+	defer func() {
+		stravaHeatmapURL = oldHeatmap
+		stravaBaseURL = oldBase
+	}()
+
+	client := &StravaSessionClient{
+		cookiesFilePath:   cookiesFile,
+		sessionIdentifier: "expired-session",
+		email:             "user@example.com",
+		password:          "secret",
+	}
+
+	if err := client.fetchCloudFrontCookies(); err != nil {
+		t.Fatalf("fetchCloudFrontCookies failed: %v", err)
+	}
+
+	// Session should be updated to the fresh value
+	if client.sessionIdentifier != "fresh-session" {
+		t.Errorf("Session not updated after re-login: got '%s'", client.sessionIdentifier)
+	}
+	// CloudFront cookies should be populated
+	if len(client.cloudFrontCookies) < 4 {
+		t.Errorf("Expected 4 CloudFront cookies, got %d", len(client.cloudFrontCookies))
+	}
+}
+
+func TestFetchCloudFrontCookies_SessionExpired_NoCredentials(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Session expired → redirect to login
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+	defer server.Close()
+
+	oldURL := stravaHeatmapURL
+	stravaHeatmapURL = server.URL
+	defer func() { stravaHeatmapURL = oldURL }()
+
+	client := &StravaSessionClient{
+		sessionIdentifier: "expired-session",
+		// No email/password configured
+	}
+
+	err := client.fetchCloudFrontCookies()
+	if err == nil {
+		t.Error("Expected error when session expired and no credentials, got none")
+	}
+	if !strings.Contains(err.Error(), "no credentials") {
+		t.Errorf("Expected 'no credentials' error, got: %v", err)
+	}
+}
+
+// ============================================================================
+// NewStravaSessionClient with credentials Tests
+// ============================================================================
+
+func TestNewStravaSessionClient_NoSession_WithCredentials_OK(t *testing.T) {
+	tempDir := t.TempDir()
+	cookiesFile := filepath.Join(tempDir, "strava-cookies.json")
+
+	// File with no _strava4_session
+	initialCookies := []cookieEntry{
+		{Name: "sp", Value: "some-cookie"},
+	}
+	data, _ := json.MarshalIndent(initialCookies, "", "  ")
+	os.WriteFile(cookiesFile, data, 0644)
+
+	client, err := NewStravaSessionClient(cookiesFile, "user@example.com", "secret")
+	if err != nil {
+		t.Fatalf("Expected no error when credentials provided, got: %v", err)
+	}
+	if client == nil {
+		t.Fatal("Expected non-nil client")
+	}
+	if client.email != "user@example.com" {
+		t.Errorf("Email not stored on client: got '%s'", client.email)
+	}
+}
+
+func TestNewStravaSessionClient_NoSession_NoCredentials_Error(t *testing.T) {
+	tempDir := t.TempDir()
+	cookiesFile := filepath.Join(tempDir, "strava-cookies.json")
+
+	initialCookies := []cookieEntry{
+		{Name: "sp", Value: "some-cookie"},
+	}
+	data, _ := json.MarshalIndent(initialCookies, "", "  ")
+	os.WriteFile(cookiesFile, data, 0644)
+
+	_, err := NewStravaSessionClient(cookiesFile, "", "")
+	if err == nil {
+		t.Error("Expected error when no session and no credentials, got none")
+	}
+	if !strings.Contains(err.Error(), "no credentials") {
+		t.Errorf("Expected 'no credentials' in error, got: %v", err)
+	}
+}
+
+func TestNewStravaSessionClient_HasSession_NoCredentials_OK(t *testing.T) {
+	tempDir := t.TempDir()
+	cookiesFile := filepath.Join(tempDir, "strava-cookies.json")
+
+	initialCookies := []cookieEntry{
+		{Name: "_strava4_session", Value: "valid-session"},
+	}
+	data, _ := json.MarshalIndent(initialCookies, "", "  ")
+	os.WriteFile(cookiesFile, data, 0644)
+
+	client, err := NewStravaSessionClient(cookiesFile, "", "")
+	if err != nil {
+		t.Fatalf("Expected no error with valid session, got: %v", err)
+	}
+	if client.sessionIdentifier != "valid-session" {
+		t.Errorf("Expected session 'valid-session', got '%s'", client.sessionIdentifier)
 	}
 }

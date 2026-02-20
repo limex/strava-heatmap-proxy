@@ -56,6 +56,49 @@ fi
 # Set the project
 gcloud config set project "${PROJECT_ID}"
 
+echo "🔐 Setting up Secret Manager for Strava credentials..."
+gcloud services enable secretmanager.googleapis.com
+
+# Prompt for credentials if not passed as environment variables
+if [ -z "${STRAVA_EMAIL}" ]; then
+    read -rp "Enter Strava email: " STRAVA_EMAIL
+fi
+if [ -z "${STRAVA_PASSWORD}" ]; then
+    read -rsp "Enter Strava password: " STRAVA_PASSWORD
+    echo
+fi
+
+# Create or update STRAVA_EMAIL secret (idempotent)
+echo -n "${STRAVA_EMAIL}" | gcloud secrets create STRAVA_EMAIL \
+    --data-file=- \
+    --replication-policy=automatic \
+    2>/dev/null || \
+echo -n "${STRAVA_EMAIL}" | gcloud secrets versions add STRAVA_EMAIL \
+    --data-file=-
+
+# Create or update STRAVA_PASSWORD secret (idempotent)
+echo -n "${STRAVA_PASSWORD}" | gcloud secrets create STRAVA_PASSWORD \
+    --data-file=- \
+    --replication-policy=automatic \
+    2>/dev/null || \
+echo -n "${STRAVA_PASSWORD}" | gcloud secrets versions add STRAVA_PASSWORD \
+    --data-file=-
+
+# Grant the Cloud Run default service account access to read the secrets
+PROJECT_NUMBER=$(gcloud projects describe "${PROJECT_ID}" --format="value(projectNumber)")
+SERVICE_ACCOUNT="${PROJECT_NUMBER}-compute@developer.gserviceaccount.com"
+gcloud secrets add-iam-policy-binding STRAVA_EMAIL \
+    --member="serviceAccount:${SERVICE_ACCOUNT}" \
+    --role="roles/secretmanager.secretAccessor" \
+    --quiet
+gcloud secrets add-iam-policy-binding STRAVA_PASSWORD \
+    --member="serviceAccount:${SERVICE_ACCOUNT}" \
+    --role="roles/secretmanager.secretAccessor" \
+    --quiet
+
+echo "✅ Secrets configured in Secret Manager"
+echo
+
 echo "📦 Building and pushing Docker image..."
 gcloud builds submit --tag "${IMAGE_NAME}" .
 

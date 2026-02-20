@@ -26,6 +26,7 @@ This guide explains how to deploy the Strava Heatmap Proxy to Google Cloud Run.
    gcloud services enable run.googleapis.com
    gcloud services enable containerregistry.googleapis.com
    gcloud services enable cloudscheduler.googleapis.com
+   gcloud services enable secretmanager.googleapis.com
    ```
 
 ## Configuration Files
@@ -125,17 +126,39 @@ The proxy uses a two-layer approach to keep CloudFront cookies fresh:
 
 Refreshed cookies are atomically written back to `strava-cookies.json` so they survive container restarts within the same deployment.
 
-## When Cookies Expire (Manual Step Required)
+## Automatic Re-Login on Session Expiry
 
-The `_strava4_session` cookie cannot be refreshed programmatically. When it expires (typically weeks to months), the proxy will fail to fetch new CloudFront tokens. Signs of this:
-- `/health` returns an old or zero expiry time
-- Logs show failed HEAD requests to `strava.com/maps`
-- Tiles return errors even after cookie refresh attempts
+The proxy automatically re-logs in when `_strava4_session` expires. No manual steps are needed as long as credentials are configured in Secret Manager (done by `deploy.sh`).
 
-**Fix**: Export fresh cookies from the browser extension, place `strava-cookies.json` in `build/`, then redeploy:
+**How it works**: When the HEAD request to `strava.com/maps` returns a redirect to `/login`, the proxy detects session expiry, performs the full Strava web login flow (GET CSRF token → POST credentials), and retries the CloudFront cookie fetch with the new session.
+
+**Signs that auto-login is working:**
+- Logs show: `Session expired, attempting re-login...`
+- Logs show: `Re-login successful, persisting new session and retrying...`
+
+**If auto-login fails repeatedly**, check:
+- Secrets `STRAVA_EMAIL` and `STRAVA_PASSWORD` exist in Secret Manager and are correct
+- Cloud Run service account has `roles/secretmanager.secretAccessor` on both secrets
+- Strava has not added CAPTCHA or IP-based bot protection to the login flow
+
+## Local Development with Credentials
+
+Pass credentials via flags:
 ```bash
-./deploy.sh
+./build/strava-heatmap-proxy \
+    -cookies ~/.config/strava-heatmap-proxy/strava-cookies.json \
+    -email your@email.com -password yourpassword \
+    -port 8080
 ```
+
+Or via environment variables:
+```bash
+export STRAVA_EMAIL=your@email.com
+export STRAVA_PASSWORD=yourpassword
+./build/strava-heatmap-proxy -cookies ~/.config/strava-heatmap-proxy/strava-cookies.json -port 8080
+```
+
+Without credentials, the proxy still works as long as `_strava4_session` in the cookies file is valid. Auto-login will be disabled and you'll need to re-export cookies manually if the session expires.
 
 ## Security Considerations
 
